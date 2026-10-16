@@ -217,7 +217,7 @@ export const readData =
         const payloads = chunk.toString().split('\n\n');
         for (const payload of payloads) {
           if (payload.includes('[DONE]') || stopTextStream) {
-            dataStart = false;
+            flushUnstartedBuffer();
             resolve(data);
             return;
           }
@@ -228,15 +228,17 @@ export const readData =
             if (!dataStart) {
               // Append content to the buffer
               buffer += content;
-              if (buffer.match(excludedPrefix ?? '')) {
-                dataStart = true;
-                // Clear the buffer once it has served its purpose
-                buffer = '';
-                if (excludedPrefix) break;
-              }
+              const prefixEnd = findPrefixEnd(buffer, excludedPrefix);
+              if (prefixEnd < 0) continue;
+              dataStart = true;
+              // Providers that stream larger chunks (e.g. Anthropic) can send
+              // the prefix and the start of the script in the same chunk, so
+              // keep everything after the prefix instead of dropping the chunk
+              content = buffer.slice(prefixEnd);
+              buffer = '';
             }
 
-            if (dataStart && content) {
+            if (content) {
               const contentWithoutExcluded = stripRegexPatterns(
                 content,
                 excluded
@@ -259,8 +261,33 @@ export const readData =
         }
       }
 
+      // If the prefix never showed up (e.g. the model replied without a code
+      // fence), output what was received rather than nothing
+      function flushUnstartedBuffer() {
+        if (dataStart || !buffer) return;
+        const content = stripRegexPatterns(buffer, excluded);
+        buffer = '';
+        data += content;
+        writer(content);
+      }
+
+      flushUnstartedBuffer();
       resolve(data);
     });
+
+// Returns the index just past the first match of prefix in text, or -1 if
+// there is no match. No prefix counts as matching at the start.
+function findPrefixEnd(text: string, prefix?: RegExp | string): number {
+  if (!prefix) return 0;
+  if (typeof prefix === 'string') {
+    const index = text.indexOf(prefix);
+    return index < 0 ? -1 : index + prefix.length;
+  }
+  const match = new RegExp(prefix.source, prefix.flags.replace('g', '')).exec(
+    text
+  );
+  return match ? match.index + match[0].length : -1;
+}
 
 function getExplanationPrompt(script: string) {
   return dedent`
